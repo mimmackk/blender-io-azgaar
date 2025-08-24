@@ -48,6 +48,62 @@ def create_mesh(self, context, name):
     return obj
 
 
+# Convert vertex color layer into a mesh material ------------------------------
+
+def vtx_color_to_material(self, obj, name):
+
+    # Create a new material and link it to the mesh object
+    mat = bpy.data.materials.new(name = name)
+    mat.use_nodes = True
+    obj.data.materials.append(mat)
+
+    # Get the node for the default material shader
+    node_bsdf = mat.node_tree.nodes.get("Principled BSDF")
+
+    # Create a new node to pull data from the designated vertex color layer
+    node_vtx_color = mat.node_tree.nodes.new(type = "ShaderNodeVertexColor")
+    node_vtx_color.layer_name = name
+
+    # Direct the vertex color node output into the material shader node input
+    mat.node_tree.links.new(node_vtx_color.outputs[0], node_bsdf.inputs[0])
+
+
+# Apply colors to vertices of a mesh object ------------------------------------
+
+def color_vertices(self, obj, vtx_color, name):
+    with bmesh_from_obj(obj) as bm:
+        layer = bm.loops.layers.color.new(name)
+        name = layer.name
+        for f in bm.faces:
+            for loop in f.loops:
+                loop[layer] = vtx_color[loop.vert.index]
+
+    # Set the new vertex color layer as the active layer & link to a material
+    obj.data.attributes.active_color = obj.data.color_attributes.get(name)
+    vtx_color_to_material(self, obj, name)
+
+
+# Normalize a mesh object by subdividing and smoothing its vertices ------------
+
+def normalize_mesh(self, obj, n_cuts, smooth_factor, smooth_x, smooth_y, smooth_z):
+    with bmesh_from_obj(obj) as bm:
+        bmesh.ops.subdivide_edges(
+            bm, 
+            edges = bm.edges, 
+            cuts = n_cuts, 
+            use_grid_fill = True
+        )
+        bmesh.ops.triangulate(bm, faces = bm.faces)
+        bmesh.ops.smooth_vert(
+            bm, 
+            verts = bm.verts, 
+            factor = smooth_factor, 
+            use_axis_x = smooth_x,
+            use_axis_y = smooth_y,
+            use_axis_z = smooth_z
+        )
+
+
 ################################################################################
 # AZGAAR DATA & OBJECT OPERATIONS
 ################################################################################
@@ -74,7 +130,31 @@ def prepare_data(self, raw):
         for xi in range(w - 1)
     ]
 
-    return {"w": w, "h": h, "x": x, "y": y, "z": z, "vtx": vtx, "faces": faces}
+    # Extract biomes from the pack object & default to zero where not given
+    biome_id = [0] * len(raw["grid"]["cells"])
+    for c in raw["pack"]["cells"]:
+        biome_id[c["g"]] = c["biome"]
+
+    # Convert biome colors from hex to RGBA notation
+    biome_rgb = [
+        [int((h.lstrip('#') + 'ff')[i:i+2], 16) / 255 for i in (0, 2, 4, 6)]
+        for h in raw["biomesData"]["color"]
+    ]
+
+    # Assign each vertex a color based on its biome
+    color = [biome_rgb[b] for b in biome_id]
+
+    return {
+        "w": w, 
+        "h": h, 
+        "x": x, 
+        "y": y, 
+        "z": z, 
+        "vtx": vtx, 
+        "faces": faces, 
+        "color": color,
+        "biome_rgb": biome_rgb
+    }
 
 
 # Create a mesh for the base heightmap -----------------------------------------
@@ -92,28 +172,10 @@ def create_heightmap(self, context, data):
         for f in data["faces"]:
             bm.faces.new((bm.verts[v] for v in f))
 
+    color_vertices(self, obj, data["color"], "Biomes")
+    normalize_mesh(self, obj, 1, 1, True, True, True)
+
     return obj
-
-
-# Smooth the heightmap ---------------------------------------------------------
-
-def smooth_heightmap(self, heightmap):
-    with bmesh_from_obj(heightmap) as bm:
-        bmesh.ops.subdivide_edges(
-            bm, 
-            edges = bm.edges, 
-            cuts = 1, 
-            use_grid_fill = True
-        )
-        bmesh.ops.triangulate(bm, faces = bm.faces)
-        bmesh.ops.smooth_vert(
-            bm, 
-            verts = bm.verts, 
-            factor = 1, 
-            use_axis_x = True,
-            use_axis_y = True,
-            use_axis_z = True
-        )
 
 
 # Add an ocean plane -----------------------------------------------------------
@@ -134,6 +196,8 @@ def create_ocean_plane(self, context, data):
         bm.verts.new((-w / 2,  h / 2, self.sea_level * self.z_scale))
         bm.faces.new(bm.verts)
 
+    color_vertices(self, obj, [data["biome_rgb"][0]] * 4, "Ocean")
+
     return obj
 
 
@@ -148,7 +212,6 @@ def import_azgaar(self, context):
             data = prepare_data(self, raw)
             ocean = create_ocean_plane(self, context, data)
             heightmap = create_heightmap(self, context, data)
-            smooth_heightmap(self, heightmap)
 
             pass
 
