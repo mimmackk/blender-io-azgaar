@@ -34,14 +34,11 @@ def bmesh_from_obj(obj):
 
 # Create a new empty mesh object -----------------------------------------------
 
-def create_mesh(settings, context, name):
+def create_mesh(self, context, name):
 
     # Create a new mesh object
     mesh = bpy.data.meshes.new(name)
     obj = bpy.data.objects.new(mesh.name, mesh)
-
-    # Rescale to user-defined settings
-    obj.scale = (settings.scale, settings.scale, settings.scale)
 
     # Set as active & selected for any subsequent operations
     context.collection.objects.link(obj)
@@ -55,105 +52,86 @@ def create_mesh(settings, context, name):
 # AZGAAR DATA & OBJECT OPERATIONS
 ################################################################################
 
-# Extract & reformat raw JSON data ---------------------------------------------
+# Extract cell data from raw JSON ----------------------------------------------
 
-def prepare_data(raw):
+def prepare_data(self, raw):
 
-    # Extract coords of cell-border vertices and remove duplicates
-    vtx_raw = [(v["p"][0], v["p"][1]) for v in raw["grid"]["vertices"]]
-    vtx_uniq = list(set(vtx_raw))
+    w = raw["grid"]["cellsX"]
+    h = raw["grid"]["cellsY"]
+    x = [ x - (w - 1) / 2 for y in range(h) for x in range(w)]
+    y = [-y + (h - 1) / 2 for y in range(h) for x in range(w)]
+    z = [c["h"] * self.z_scale for c in raw["grid"]["cells"]]
 
-    # Map original vertex indices to their new index in the non-duplicate set
-    xref = {coord: i for i, coord in enumerate(vtx_uniq)}
-    xref = {old: xref[coord] for old, coord in enumerate(vtx_raw)}
-
-    # Represent each cell as an ordered list of unique vertices to form a face
-    faces = [[xref[v] for v in c["v"]] for c in raw["grid"]["cells"]]
-    faces = [list(dict.fromkeys(f)) for f in faces]
-
-    # Create a mapping between "border" vertices and all their adjacent cells
-    vtx_cells = [[] for i in range(len(vtx_uniq))]
-    for cell_id, f in enumerate(faces):
-        for v in f:
-            vtx_cells[v].append(cell_id)
-
-    # Extract the height for the center of each cell
-    cell_height = [c["h"] for c in raw["grid"]["cells"]]
-
-    # Default border vertex height is the average height of its adjacent cells
-    vtx_height = [
-        sum([cell_height[c] for c in cells]) / len(cells) 
-        for cells in vtx_cells
+    vtx = tuple(zip(x, y, z))
+    faces = [
+        (
+            w * (yi + 1) + xi,
+            w * (yi + 1) + xi + 1,
+            w * yi + xi + 1,
+            w * yi + xi,
+        )
+        for yi in range(h - 1)
+        for xi in range(w - 1)
     ]
 
-    # Add the elevation to the vertex coordinates, center on (0, 0), and flip y
-    vtx_coords = [
-        (x - raw["info"]["width"] / 2, -y + raw["info"]["height"] / 2, z)
-        for ((x, y), z) in zip(vtx_uniq, vtx_height)
-    ]
-
-    # Combine all output into a final nested dataset
-    cleaned = {
-        "vertices": {
-            "coords": vtx_coords,
-            "cells": vtx_cells
-        },
-        "cells": {
-            "vertices": faces,
-            "height": cell_height,
-            "biome_id":   [cell["b"] for cell in raw["grid"]["cells"]],
-            "feature_id": [cell["f"] for cell in raw["grid"]["cells"]]
-        },
-        "canvas": {
-            "width":  raw["info"]["width"],
-            "height": raw["info"]["height"]
-        }
-    }
-
-    return cleaned
+    return {"w": w, "h": h, "x": x, "y": y, "z": z, "vtx": vtx, "faces": faces}
 
 
 # Create a mesh for the base heightmap -----------------------------------------
 
-def create_heightmap(settings, context, data):
-    obj = create_mesh(settings, context, "Heightmap")
+def create_heightmap(self, context, data):
+
+    obj = create_mesh(self, context, "Heightmap")
 
     with bmesh_from_obj(obj) as bm:
-
-        # Add vertices for all cell borders to the mesh
-        for v in data["vertices"]["coords"]:
+        for v in data["vtx"]:
             bm.verts.new(v)
 
         bm.verts.ensure_lookup_table()
 
-        # Create mesh faces from cell borders
-        for f in data["cells"]["vertices"]:
-            bm.faces.new([bm.verts[v] for v in f])
-
-        # Generate a new vertex at each cell center & assign it the cell height
-        ctr = bmesh.ops.poke(bm, faces = bm.faces)
-        for (v, h) in zip(ctr["verts"], data["cells"]["height"]): 
-            v.co.z = h
+        for f in data["faces"]:
+            bm.faces.new((bm.verts[v] for v in f))
 
     return obj
 
 
-# Add an ocean plane based on canvas size --------------------------------------
+# Smooth the heightmap ---------------------------------------------------------
 
-def create_ocean(settings, context, data):
+def smooth_heightmap(self, heightmap):
+    with bmesh_from_obj(heightmap) as bm:
+        bmesh.ops.subdivide_edges(
+            bm, 
+            edges = bm.edges, 
+            cuts = 1, 
+            use_grid_fill = True
+        )
+        bmesh.ops.triangulate(bm, faces = bm.faces)
+        bmesh.ops.smooth_vert(
+            bm, 
+            verts = bm.verts, 
+            factor = 1, 
+            use_axis_x = True,
+            use_axis_y = True,
+            use_axis_z = True
+        )
+
+
+# Add an ocean plane -----------------------------------------------------------
+
+def create_ocean_plane(self, context, data):
+
+    # Create a new, empty mesh and set as active & selected
+    obj = create_mesh(self, context, "Ocean")
+
+    w = data["w"]
+    h = data["h"]
 
     # Use canvas size to create 4 corners
-    w = data["canvas"]["width"]
-    h = data["canvas"]["height"]
-
-    obj = create_mesh(settings, context, "Ocean")
-
-    # Add the corners of the plane as mesh vertices and create its face
     with bmesh_from_obj(obj) as bm:
-        bm.verts.new((-w / 2, -h / 2, settings.sea_level))
-        bm.verts.new(( w / 2, -h / 2, settings.sea_level))
-        bm.verts.new(( w / 2,  h / 2, settings.sea_level))
-        bm.verts.new((-w / 2,  h / 2, settings.sea_level))
+        bm.verts.new((-w / 2, -h / 2, self.sea_level * self.z_scale))
+        bm.verts.new(( w / 2, -h / 2, self.sea_level * self.z_scale))
+        bm.verts.new(( w / 2,  h / 2, self.sea_level * self.z_scale))
+        bm.verts.new((-w / 2,  h / 2, self.sea_level * self.z_scale))
         bm.faces.new(bm.verts)
 
     return obj
@@ -161,15 +139,18 @@ def create_ocean(settings, context, data):
 
 # Import JSON & manage creation of blender objects -----------------------------
 
-def import_azgaar(settings, context):
-    if settings.filepath:
+def import_azgaar(self, context):
+    if self.filepath:
         try:
-            with open(settings.filepath, "r") as f:
+            with open(self.filepath, "r") as f:
                 raw = json.load(f)
 
-            data = prepare_data(raw)
-            heightmap = create_heightmap(settings, context, data)
-            ocean = create_ocean(settings, context, data)
+            data = prepare_data(self, raw)
+            ocean = create_ocean_plane(self, context, data)
+            heightmap = create_heightmap(self, context, data)
+            smooth_heightmap(self, heightmap)
+
+            pass
 
         except Exception as e:
             print("Failed to import Azgaar JSON: ", e)
@@ -191,9 +172,9 @@ class ImportAzgaar(bpy.types.Operator, ImportHelper):
         options = {'HIDDEN'}
     ) # type: ignore
 
-    scale: bpy.props.FloatProperty(
-        name = "Scale", 
-        default = 0.01,
+    z_scale: bpy.props.FloatProperty(
+        name = "Z Scale", 
+        default = 0.1,
         min = 0.001,
         max = 1,
         step = 1
@@ -201,7 +182,7 @@ class ImportAzgaar(bpy.types.Operator, ImportHelper):
 
     sea_level: bpy.props.FloatProperty(
         name = "Sea Level (0-100)", 
-        default = 15,
+        default = 10,
         min = 0,
         max = 100,
         step = 100,
@@ -213,7 +194,7 @@ class ImportAzgaar(bpy.types.Operator, ImportHelper):
 
     def draw(self, context):
         layout = self.layout.column(align = False)
-        layout.prop(self, "scale")
+        layout.prop(self, "z_scale")
         layout.prop(self, "sea_level")
 
 def menu_func(self, context):
