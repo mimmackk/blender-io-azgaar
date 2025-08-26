@@ -41,7 +41,7 @@ def create_mesh(self, context, name):
     obj = bpy.data.objects.new(mesh.name, mesh)
 
     # Set as active & selected for any subsequent operations
-    context.collection.objects.link(obj)
+    self.collection.objects.link(obj)
     context.view_layer.objects.active = obj
     context.object.select_set(True)
 
@@ -144,6 +144,18 @@ def prepare_data(self, raw):
     # Assign each vertex a color based on its biome
     color = [biome_rgb[b] for b in biome_id]
 
+    cell_to_grid = [c["g"] for c in raw["pack"]["cells"]]
+
+    river = {
+        "cells": [
+            list(dict.fromkeys([cell_to_grid[c] for c in river["cells"] if c != -1]))
+            for river in raw["pack"]["rivers"]
+        ],
+        "width": [c["width"] for c in raw["pack"]["rivers"]],
+        "width_factor": [c["widthFactor"] for c in raw["pack"]["rivers"]],
+        "source_width": [c["sourceWidth"] for c in raw["pack"]["rivers"]]
+    }
+
     return {
         "w": w, 
         "h": h, 
@@ -153,7 +165,8 @@ def prepare_data(self, raw):
         "vtx": vtx, 
         "faces": faces, 
         "color": color,
-        "biome_rgb": biome_rgb
+        "biome_rgb": biome_rgb,
+        "river": river
     }
 
 
@@ -201,6 +214,19 @@ def create_ocean_plane(self, context, data):
     return obj
 
 
+# Create rivers as bezier curves -----------------------------------------------
+
+def create_rivers(self, context, data, heightmap):
+
+    # Create a new sub-collection to hold the set of all rivers
+    river_collection = bpy.data.collections.new("Rivers")
+    self.collection.children.link(river_collection)
+
+    # TODO
+
+    pass
+
+
 # Import JSON & manage creation of blender objects -----------------------------
 
 def import_azgaar(self, context):
@@ -208,10 +234,15 @@ def import_azgaar(self, context):
         try:
             with open(self.filepath, "r") as f:
                 raw = json.load(f)
+            
+            # Generate a new collection to store all Azgaar objects
+            self.collection = bpy.data.collections.new(raw["info"]["mapName"])
+            context.scene.collection.children.link(self.collection)
 
             data = prepare_data(self, raw)
             ocean = create_ocean_plane(self, context, data)
             heightmap = create_heightmap(self, context, data)
+            rivers = create_rivers(self, context, data, heightmap)
 
             pass
 
