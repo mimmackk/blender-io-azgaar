@@ -34,14 +34,14 @@ def bmesh_from_obj(obj):
 
 # Create a new empty mesh object -----------------------------------------------
 
-def create_mesh(self, context, name):
+def create_mesh(self, context, collection, name):
 
-    # Create a new mesh object
+    # Create a new mesh object within collection
     mesh = bpy.data.meshes.new(name)
     obj = bpy.data.objects.new(mesh.name, mesh)
+    collection.objects.link(obj)
 
     # Set as active & selected for any subsequent operations
-    self.collection.objects.link(obj)
     context.view_layer.objects.active = obj
     context.object.select_set(True)
 
@@ -102,6 +102,35 @@ def normalize_mesh(self, obj, n_cuts, smooth_factor, smooth_x, smooth_y, smooth_
             use_axis_y = smooth_y,
             use_axis_z = smooth_z
         )
+
+
+# Create a bezier curve --------------------------------------------------------
+
+def create_bezier(self, context, collection, name, coords):
+
+    # Create a new, empty curve and within collection
+    curve = bpy.data.curves.new(name, type = 'CURVE')
+    obj = bpy.data.objects.new(curve.name, curve)
+    collection.objects.link(obj)
+
+    # Set global settings of the curve
+    curve.dimensions = '2D'
+    curve.resolution_u = 12
+    curve.bevel_depth = 0.1  # relates to river width
+
+    # Map coordinates to a spline
+    spline = curve.splines.new('BEZIER')
+    spline.bezier_points.add(len(coords) - 1)
+    for i, p in enumerate(coords):
+        spline.bezier_points[i].co = p
+        spline.bezier_points[i].handle_left_type  = 'AUTO'
+        spline.bezier_points[i].handle_right_type = 'AUTO'
+
+    # Set as active & selected for any subsequent operations
+    context.view_layer.objects.active = obj
+    context.object.select_set(True)
+
+    return obj
 
 
 ################################################################################
@@ -172,20 +201,20 @@ def prepare_data(self, raw):
 
 # Create a mesh for the base heightmap -----------------------------------------
 
-def create_heightmap(self, context, data):
+def create_heightmap(self, context):
 
-    obj = create_mesh(self, context, "Heightmap")
+    obj = create_mesh(self, context, self.collection, "Heightmap")
 
     with bmesh_from_obj(obj) as bm:
-        for v in data["vtx"]:
+        for v in self.data["vtx"]:
             bm.verts.new(v)
 
         bm.verts.ensure_lookup_table()
 
-        for f in data["faces"]:
+        for f in self.data["faces"]:
             bm.faces.new((bm.verts[v] for v in f))
 
-    color_vertices(self, obj, data["color"], "Biomes")
+    color_vertices(self, obj, self.data["color"], "Biomes")
     normalize_mesh(self, obj, 1, 1, True, True, True)
 
     return obj
@@ -193,13 +222,13 @@ def create_heightmap(self, context, data):
 
 # Add an ocean plane -----------------------------------------------------------
 
-def create_ocean_plane(self, context, data):
+def create_ocean_plane(self, context):
 
     # Create a new, empty mesh and set as active & selected
-    obj = create_mesh(self, context, "Ocean")
+    obj = create_mesh(self, context, self.collection, "Ocean")
 
-    w = data["w"]
-    h = data["h"]
+    w = self.data["w"]
+    h = self.data["h"]
 
     # Use canvas size to create 4 corners
     with bmesh_from_obj(obj) as bm:
@@ -209,22 +238,49 @@ def create_ocean_plane(self, context, data):
         bm.verts.new((-w / 2,  h / 2, self.sea_level * self.z_scale))
         bm.faces.new(bm.verts)
 
-    color_vertices(self, obj, [data["biome_rgb"][0]] * 4, "Ocean")
+    color_vertices(self, obj, [self.data["biome_rgb"][0]] * 4, "Ocean")
 
     return obj
 
 
 # Create rivers as bezier curves -----------------------------------------------
 
-def create_rivers(self, context, data, heightmap):
+def create_rivers(self, context, heightmap):
 
-    # Create a new sub-collection to hold the set of all rivers
-    river_collection = bpy.data.collections.new("Rivers")
-    self.collection.children.link(river_collection)
+    # Create a new sub-collection for all rivers
+    coll = bpy.data.collections.new("Rivers")
+    self.collection.children.link(coll)
 
-    # TODO
+    # Get the current X-Y coordinates of each cell on the smoothed heightmap
+    cell_coords = [(v.co.x, v.co.y, 0) for v in heightmap.data.vertices]
+    river_coords = [
+        [cell_coords[c] for c in clist] 
+        for clist in self.data["river"]["cells"]
+    ]
 
-    pass
+    # Create a blue river material
+    mat = bpy.data.materials.new(name = "River")
+    mat.diffuse_color = self.data["biome_rgb"][0]
+
+    # Create bezier curve objects for each river
+    objs = [
+        create_bezier(self, context, coll, f"River {i:03d}", coords)
+        for i, coords in enumerate(river_coords)
+    ]
+
+    # Mold the river to the heightmap surface & apply blue water material
+    for obj in objs:
+        modifier = obj.modifiers.new(name = "Shrinkwrap", type = 'SHRINKWRAP')
+        modifier.target = heightmap
+        modifier.wrap_method = 'PROJECT'
+        modifier.wrap_mode = 'ABOVE_SURFACE'
+        modifier.use_project_x = False
+        modifier.use_project_y = False
+        modifier.use_project_z = True
+        modifier.offset = 0.01
+        obj.data.materials.append(mat)
+
+    return objs
 
 
 # Import JSON & manage creation of blender objects -----------------------------
@@ -233,16 +289,20 @@ def import_azgaar(self, context):
     if self.filepath:
         try:
             with open(self.filepath, "r") as f:
-                raw = json.load(f)
-            
+                raw_data = json.load(f)
+
             # Generate a new collection to store all Azgaar objects
-            self.collection = bpy.data.collections.new(raw["info"]["mapName"])
+            map_name = raw_data["info"]["mapName"]
+            self.collection = bpy.data.collections.new(map_name)
             context.scene.collection.children.link(self.collection)
 
-            data = prepare_data(self, raw)
-            ocean = create_ocean_plane(self, context, data)
-            heightmap = create_heightmap(self, context, data)
-            rivers = create_rivers(self, context, data, heightmap)
+            # Extract & reformat relevant data from raw JSON export
+            self.data = prepare_data(self, raw_data)
+
+            # Convert data into blender objects
+            ocean = create_ocean_plane(self, context)
+            heightmap = create_heightmap(self, context)
+            rivers = create_rivers(self, context, heightmap)
 
             pass
 
