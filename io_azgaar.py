@@ -134,6 +134,26 @@ def create_bezier(self, context, collection, name, coords, radius):
     return obj
 
 
+# Create a primitive sphere ----------------------------------------------------
+
+def create_sphere(self, context, collection, name, coords, radius):
+
+    # Create a new, empty mesh and within collection
+    mesh = bpy.data.meshes.new(name)
+    obj = bpy.data.objects.new(mesh.name, mesh)
+    collection.objects.link(obj)
+
+    with bmesh_from_obj(obj) as bm:
+        bmesh.ops.create_icosphere(bm, subdivisions = 2, radius = radius)
+        bmesh.ops.translate(bm, verts = bm.verts, vec = coords)
+
+    # Set as active & selected for any subsequent operations
+    context.view_layer.objects.active = obj
+    context.object.select_set(True)
+
+    return obj
+
+
 ################################################################################
 # AZGAAR DATA & OBJECT OPERATIONS
 ################################################################################
@@ -174,8 +194,9 @@ def prepare_data(self, raw):
     # Assign each vertex a color based on its biome
     color = [biome_rgb[b] for b in biome_id]
 
-    # Extract river paths
     cell_to_grid = [c["g"] for c in raw["pack"]["cells"]]
+
+    # Extract river paths
     river = {
         "cells": [
             list(dict.fromkeys([cell_to_grid[c] for c in river["cells"] if c != -1]))
@@ -184,6 +205,16 @@ def prepare_data(self, raw):
         "width": [c["width"] for c in raw["pack"]["rivers"]],
         "width_factor": [c["widthFactor"] for c in raw["pack"]["rivers"]],
         "source_width": [c["sourceWidth"] for c in raw["pack"]["rivers"]]
+    }
+
+    # Extract burgs
+    burg = {
+        "cell": [cell_to_grid[burg["cell"]] for burg in raw["pack"]["burgs"][1:]],
+        "x": [b["x"] for b in raw["pack"]["burgs"][1:]],
+        "y": [b["y"] for b in raw["pack"]["burgs"][1:]],
+        "capital": [b["capital"] for b in raw["pack"]["burgs"][1:]],
+        "population": [b["population"] for b in raw["pack"]["burgs"][1:]],
+        "name": [b["name"] for b in raw["pack"]["burgs"][1:]]
     }
 
     return {
@@ -196,7 +227,8 @@ def prepare_data(self, raw):
         "faces": faces, 
         "color": color,
         "biome_rgb": biome_rgb,
-        "river": river
+        "river": river,
+        "burg": burg
     }
 
 
@@ -298,6 +330,26 @@ def create_rivers(self, context, heightmap):
     return objs
 
 
+# Create burgs as primitive spheres --------------------------------------------
+
+def create_burgs(self, context, heightmap):
+
+    # Create a new sub-collection for all burgs
+    coll = bpy.data.collections.new("Burgs")
+    self.collection.children.link(coll)
+
+    # Get the current X-Y coordinates of each cell on the smoothed heightmap
+    cell_coords = [(v.co.x, v.co.y, v.co.z) for v in heightmap.data.vertices]
+    burg_coords = [cell_coords[c] for c in self.data["burg"]["cell"]]
+
+    # Create an icosphere for each burg
+    objs = [
+        create_sphere(self, context, coll, f"Burg {i:03d}", coords, 0.2)
+        for i, coords in enumerate(burg_coords)
+    ]
+
+    return objs
+
 # Import JSON & manage creation of blender objects -----------------------------
 
 def import_azgaar(self, context):
@@ -318,6 +370,7 @@ def import_azgaar(self, context):
             ocean = create_ocean_plane(self, context)
             heightmap = create_heightmap(self, context)
             rivers = create_rivers(self, context, heightmap)
+            burgs = create_burgs(self, context, heightmap)
 
             pass
 
