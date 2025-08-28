@@ -106,25 +106,26 @@ def normalize_mesh(self, obj, n_cuts, smooth_factor, smooth_x, smooth_y, smooth_
 
 # Create a bezier curve --------------------------------------------------------
 
-def create_bezier(self, context, collection, name, coords):
+def create_bezier(self, context, collection, name, coords, radius):
 
     # Create a new, empty curve and within collection
     curve = bpy.data.curves.new(name, type = 'CURVE')
     obj = bpy.data.objects.new(curve.name, curve)
     collection.objects.link(obj)
 
-    # Set global settings of the curve
+    # Apply curve settings
     curve.dimensions = '2D'
     curve.resolution_u = 12
-    curve.bevel_depth = 0.1  # relates to river width
+    curve.bevel_depth = 0.1
 
-    # Map coordinates to a spline
+    # Map coordinates to a spline at defined radius
     spline = curve.splines.new('BEZIER')
     spline.bezier_points.add(len(coords) - 1)
-    for i, p in enumerate(coords):
+    for i, (p, r) in enumerate(zip(coords, radius)):
         spline.bezier_points[i].co = p
         spline.bezier_points[i].handle_left_type  = 'AUTO'
         spline.bezier_points[i].handle_right_type = 'AUTO'
+        spline.bezier_points[i].radius = r
 
     # Set as active & selected for any subsequent operations
     context.view_layer.objects.active = obj
@@ -173,8 +174,8 @@ def prepare_data(self, raw):
     # Assign each vertex a color based on its biome
     color = [biome_rgb[b] for b in biome_id]
 
+    # Extract river paths
     cell_to_grid = [c["g"] for c in raw["pack"]["cells"]]
-
     river = {
         "cells": [
             list(dict.fromkeys([cell_to_grid[c] for c in river["cells"] if c != -1]))
@@ -258,18 +259,30 @@ def create_rivers(self, context, heightmap):
         for clist in self.data["river"]["cells"]
     ]
 
+    # Compute the width of the river
+    min_width = 0.2
+    river_width = [
+        [src_w / 2 * fct] + [max(w / 2 * fct, min_width)] * (len(coords) - 1)
+        for (w, fct, src_w, coords) in zip(
+            self.data["river"]["width"], 
+            self.data["river"]["width_factor"], 
+            self.data["river"]["source_width"],
+            river_coords
+        )
+    ]
+
     # Create a blue river material
     mat = bpy.data.materials.new(name = "River")
     mat.diffuse_color = self.data["biome_rgb"][0]
 
     # Create bezier curve objects for each river
     objs = [
-        create_bezier(self, context, coll, f"River {i:03d}", coords)
-        for i, coords in enumerate(river_coords)
+        create_bezier(self, context, coll, f"River {i:03d}", coords, radius)
+        for i, (coords, radius) in enumerate(zip(river_coords, river_width))
     ]
 
-    # Mold the river to the heightmap surface & apply blue water material
     for obj in objs:
+        # Mold each river to the heightmap surface
         modifier = obj.modifiers.new(name = "Shrinkwrap", type = 'SHRINKWRAP')
         modifier.target = heightmap
         modifier.wrap_method = 'PROJECT'
@@ -278,6 +291,8 @@ def create_rivers(self, context, heightmap):
         modifier.use_project_y = False
         modifier.use_project_z = True
         modifier.offset = 0.01
+
+        # Apply blue water material
         obj.data.materials.append(mat)
 
     return objs
