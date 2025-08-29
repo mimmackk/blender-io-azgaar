@@ -114,18 +114,18 @@ def create_bezier(self, context, collection, name, coords, radius):
     collection.objects.link(obj)
 
     # Apply curve settings
-    curve.dimensions = '2D'
+    curve.dimensions = '3D'
     curve.resolution_u = 12
-    curve.bevel_depth = 0.1
+    curve.bevel_depth = 0.2
 
     # Map coordinates to a spline at defined radius
     spline = curve.splines.new('BEZIER')
     spline.bezier_points.add(len(coords) - 1)
-    for i, (p, r) in enumerate(zip(coords, radius)):
+    for i, p in enumerate(coords):
         spline.bezier_points[i].co = p
         spline.bezier_points[i].handle_left_type  = 'AUTO'
         spline.bezier_points[i].handle_right_type = 'AUTO'
-        spline.bezier_points[i].radius = r
+        spline.bezier_points[i].radius = radius
 
     # Set as active & selected for any subsequent operations
     context.view_layer.objects.active = obj
@@ -197,6 +197,7 @@ def prepare_data(self, raw):
     cell_to_grid = [c["g"] for c in raw["pack"]["cells"]]
 
     # Extract river paths
+    river_id_format = "River {:0" + str(len(str(len(raw["pack"]["rivers"])))) + "d}"
     river = {
         "cells": [
             list(dict.fromkeys([cell_to_grid[c] for c in river["cells"] if c != -1]))
@@ -204,17 +205,30 @@ def prepare_data(self, raw):
         ],
         "width": [c["width"] for c in raw["pack"]["rivers"]],
         "width_factor": [c["widthFactor"] for c in raw["pack"]["rivers"]],
-        "source_width": [c["sourceWidth"] for c in raw["pack"]["rivers"]]
+        "source_width": [c["sourceWidth"] for c in raw["pack"]["rivers"]],
+        "obj_id": [river_id_format.format(i) for i in range(len(raw["pack"]["rivers"]))]
     }
 
     # Extract burgs
+    burg_id_format = "Burg {:0" + str(len(str(len(raw["pack"]["burgs"])))) + "d}"
     burg = {
         "cell": [cell_to_grid[burg["cell"]] for burg in raw["pack"]["burgs"][1:]],
         "x": [b["x"] for b in raw["pack"]["burgs"][1:]],
         "y": [b["y"] for b in raw["pack"]["burgs"][1:]],
         "capital": [b["capital"] for b in raw["pack"]["burgs"][1:]],
         "population": [b["population"] for b in raw["pack"]["burgs"][1:]],
-        "name": [b["name"] for b in raw["pack"]["burgs"][1:]]
+        "name": [b["name"] for b in raw["pack"]["burgs"][1:]],
+        "obj_id": [burg_id_format.format(i) for i in range(len(raw["pack"]["burgs"]))]
+    }
+
+    # Extract routes
+    route_id_format = "Route {:0" + str(len(str(len(raw["pack"]["routes"])))) + "d}"
+    route = {
+        "cells": [
+            list(dict.fromkeys([cell_to_grid[c[2]] for c in route["points"]]))
+            for route in raw["pack"]["routes"]
+        ],
+        "obj_id": [route_id_format.format(i) for i in range(len(raw["pack"]["routes"]))]
     }
 
     return {
@@ -228,7 +242,8 @@ def prepare_data(self, raw):
         "color": color,
         "biome_rgb": biome_rgb,
         "river": river,
-        "burg": burg
+        "burg": burg,
+        "route": route
     }
 
 
@@ -285,23 +300,13 @@ def create_rivers(self, context, heightmap):
     self.collection.children.link(coll)
 
     # Get the current X-Y coordinates of each cell on the smoothed heightmap
-    cell_coords = [(v.co.x, v.co.y, 0) for v in heightmap.data.vertices]
+    offset = 0.1
+    cell_coords = [(v.co.x, v.co.y, v.co.z + offset) for v in heightmap.data.vertices]
     river_coords = [
         [cell_coords[c] for c in clist] 
         for clist in self.data["river"]["cells"]
     ]
-
-    # Compute the width of the river
-    min_width = 0.2
-    river_width = [
-        [src_w / 2 * fct] + [max(w / 2 * fct, min_width)] * (len(coords) - 1)
-        for (w, fct, src_w, coords) in zip(
-            self.data["river"]["width"], 
-            self.data["river"]["width_factor"], 
-            self.data["river"]["source_width"],
-            river_coords
-        )
-    ]
+    river_radius = [w / 2 for w in self.data["river"]["width"]]
 
     # Create a blue river material
     mat = bpy.data.materials.new(name = "River")
@@ -309,12 +314,16 @@ def create_rivers(self, context, heightmap):
 
     # Create bezier curve objects for each river
     objs = [
-        create_bezier(self, context, coll, f"River {i:03d}", coords, radius)
-        for i, (coords, radius) in enumerate(zip(river_coords, river_width))
+        create_bezier(self, context, coll, name, coords, radius)
+        for coords, radius, name in zip(
+            river_coords, 
+            river_radius, 
+            self.data["river"]["obj_id"]
+        )
     ]
 
     for obj in objs:
-        # Mold each river to the heightmap surface
+        # Flatten each river to the heightmap surface
         modifier = obj.modifiers.new(name = "Shrinkwrap", type = 'SHRINKWRAP')
         modifier.target = heightmap
         modifier.wrap_method = 'PROJECT'
@@ -322,6 +331,8 @@ def create_rivers(self, context, heightmap):
         modifier.use_project_x = False
         modifier.use_project_y = False
         modifier.use_project_z = True
+        modifier.use_negative_direction = True
+        modifier.use_positive_direction = True
         modifier.offset = 0.01
 
         # Apply blue water material
@@ -344,11 +355,50 @@ def create_burgs(self, context, heightmap):
 
     # Create an icosphere for each burg
     objs = [
-        create_sphere(self, context, coll, f"Burg {i:03d}", coords, 0.2)
-        for i, coords in enumerate(burg_coords)
+        create_sphere(self, context, coll, name, coords, 0.3)
+        for coords, name in zip(burg_coords, self.data["burg"]["obj_id"])
     ]
 
     return objs
+
+
+# Create routes as bezier curves -----------------------------------------------
+
+def create_routes(self, context, heightmap):
+
+    # Create a new sub-collection for all routes
+    coll = bpy.data.collections.new("Routes")
+    self.collection.children.link(coll)
+
+    # Get the current X-Y coordinates of each cell on the smoothed heightmap
+    offset = 0.1
+    cell_coords = [(v.co.x, v.co.y, v.co.z + offset) for v in heightmap.data.vertices]
+    route_coords = [
+        [cell_coords[c] for c in clist] 
+        for clist in self.data["route"]["cells"]
+    ]
+
+    # Create bezier curve objects for each route
+    objs = [
+        create_bezier(self, context, coll, name, coords, 1)
+        for coords, name in zip(route_coords, self.data["route"]["obj_id"])
+    ]
+
+    for obj in objs:
+        # Flatten each route to the heightmap surface
+        modifier = obj.modifiers.new(name = "Shrinkwrap", type = 'SHRINKWRAP')
+        modifier.target = heightmap
+        modifier.wrap_method = 'PROJECT'
+        modifier.wrap_mode = 'ABOVE_SURFACE'
+        modifier.use_project_x = False
+        modifier.use_project_y = False
+        modifier.use_project_z = True
+        modifier.use_negative_direction = True
+        modifier.use_positive_direction = True
+        modifier.offset = 0.01
+
+    return objs
+
 
 # Import JSON & manage creation of blender objects -----------------------------
 
@@ -371,6 +421,9 @@ def import_azgaar(self, context):
             heightmap = create_heightmap(self, context)
             rivers = create_rivers(self, context, heightmap)
             burgs = create_burgs(self, context, heightmap)
+
+            # Routes have discontinuity issues
+            # routes = create_routes(self, context, heightmap)
 
             pass
 
