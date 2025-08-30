@@ -1,6 +1,6 @@
 # Azgaar Fantasy Map Import: Blender Add-On
 
-This Blender add-on imports a height map from Azgaar's Fantasy Map Generator.
+This Blender add-on imports a height map from [Azgaar's Fantasy Map Generator](https://github.com/Azgaar/Fantasy-Map-Generator).
 
 ## Installation
 
@@ -16,3 +16,12 @@ This Blender add-on imports a height map from Azgaar's Fantasy Map Generator.
     - On the right-hand side of the file browser, there are options to set the default height of the ocean plane and vertical scale of the map.
 3. To view biomes, set the viewport shading option to `Material Preview`
     - Biome colors can be edited by switching from `Object Mode` to `Vertex Paint`
+4. All routes are imported, but are temporarilly hidden by default due to issues with discontinuous routes.
+
+## Coming Soon
+
+- Discontinuous route fixes
+- Lakes above sea level
+- Meandering river paths
+- Tapered river widths
+- Additional burg properties

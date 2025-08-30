@@ -397,6 +397,10 @@ def create_routes(self, context, heightmap):
         modifier.use_positive_direction = True
         modifier.offset = 0.01
 
+    # TEMPORARY: exclude by default due to issues with discontinuous routes
+    map_coll = bpy.context.view_layer.layer_collection.children[self.collection.name]
+    map_coll.children[coll.name].exclude = True
+
     return objs
 
 
@@ -421,9 +425,7 @@ def import_azgaar(self, context):
             heightmap = create_heightmap(self, context)
             rivers = create_rivers(self, context, heightmap)
             burgs = create_burgs(self, context, heightmap)
-
-            # Routes have discontinuity issues
-            # routes = create_routes(self, context, heightmap)
+            routes = create_routes(self, context, heightmap)
 
             pass
 
